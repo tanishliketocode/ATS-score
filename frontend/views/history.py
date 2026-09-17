@@ -63,11 +63,23 @@ def render() -> None:
                 st.markdown(f"**JD Match:** {jd_comparison.get('match_percentage', 0):.0f}%")
 
             entry_id = entry.get("id")
-            if entry_id:
-                if st.button("🗑️ Delete", key=f"delete_{idx}"):
-                    try:
-                        api_client.delete_history_entry(str(entry_id), access_token)
-                        st.success("Deleted.")
-                        st.rerun()
-                    except requests.RequestException as exc:
-                        _show_backend_error(exc)
+            h_col1, h_col2 = st.columns([1, 1])
+            with h_col1:
+                from frontend.views.scorer import _summary_text
+                st.download_button(
+                    "📄 Download Report (.txt)",
+                    data=_summary_text(analysis),
+                    file_name=f"ats_report_{filename}.txt",
+                    mime="text/plain",
+                    use_container_width=True,
+                    key=f"dl_txt_{idx}",
+                )
+            with h_col2:
+                if entry_id:
+                    if st.button("🗑️ Delete", key=f"delete_{idx}", use_container_width=True):
+                        try:
+                            api_client.delete_history_entry(str(entry_id), access_token)
+                            st.success("Deleted.")
+                            st.rerun()
+                        except requests.RequestException as exc:
+                            _show_backend_error(exc)

@@ -8,7 +8,8 @@ from groq import Groq
 logger=logging.getLogger('ats_resume_scorer')
 
 
-GROQ_MODEL='llama-3.3-70b-versatile'
+GROQ_MODEL = os.getenv('GROQ_MODEL', 'openai/gpt-oss-120b')
+FALLBACK_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b']
 
 _client=None
 
@@ -75,49 +76,101 @@ Important instructions:
 Resume Text:
 {raw_text}"""
 
-def _call_groq(client:Groq, system_prompt:str, user_prompt:str)->str:
-
-    response=client.chat.completions.create(
-        model=GROQ_MODEL, 
-        messages=[
-            {'role': 'system', 'content': system_prompt},
-            {'role': 'user', 'content': user_prompt}
-        ],
-        temperature=0.0,
-        max_tokens=4096
-    )
-
-    return response.choices[0].message.content.strip()
+def _call_groq(client: Groq, system_prompt: str, user_prompt: str) -> str:
+    models_to_try = [GROQ_MODEL] + [m for m in FALLBACK_MODELS if m != GROQ_MODEL]
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_prompt}
+                ],
+                temperature=0.0,
+                max_tokens=8192,
+                response_format={'type': 'json_object'}
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as err:
+            logger.warning(f"Groq call with model '{model_name}' (json_object) failed: {err}. Retrying without response_format...")
+            try:
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {'role': 'system', 'content': system_prompt},
+                        {'role': 'user', 'content': user_prompt}
+                    ],
+                    temperature=0.0,
+                    max_tokens=8192
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as e2:
+                logger.warning(f"Groq call with model '{model_name}' failed: {e2}")
+                last_error = e2
+    raise last_error
 
 def _try_parse_json(text: str) -> dict | None:
-
-    # Strip markdown code fences if present
     cleaned = text.strip()
     if cleaned.startswith("```"):
-
-        # Remove opening fence (```json or ```)
         first_newline = cleaned.index("\n") if "\n" in cleaned else len(cleaned)
         cleaned = cleaned[first_newline + 1:]
-        # Remove closing fence
         if cleaned.endswith("```"):
             cleaned = cleaned[:-3]
         cleaned = cleaned.strip()
 
     try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        return None
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    try:
+        import json_repair
+        parsed = json_repair.loads(cleaned)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    return None
     
+def _fallback_parse_resume(raw_text: str) -> Dict:
+    """Heuristic fallback parser when Groq cannot return valid JSON."""
+    import re
+    email_match = re.search(r'[\w\.-]+@[\w\.-]+', raw_text)
+    phone_match = re.search(r'\+?\d[\d\s-]{8,}\d', raw_text)
+    lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
+    first_line = lines[0] if lines else ""
+
+    fallback = {
+        "name": first_line[:50],
+        "email": email_match.group(0) if email_match else None,
+        "phone": phone_match.group(0) if phone_match else None,
+        "professional_summary": "",
+        "skills": [],
+        "experience": [],
+        "projects": [],
+        "keywords": [w for w in raw_text.split() if len(w) > 4][:25],
+    }
+    return _validate_resume_result(fallback)
+
 def parse_resume(raw_text: str)->Dict:
+    try:
+        client = _get_client()
+    except Exception as exc:
+        logger.warning(f"Could not initialize Groq client ({exc}); using fallback parse")
+        return _fallback_parse_resume(raw_text)
 
-    client=_get_client()
-    prompt=RESUME_USER_PROMPT.format(raw_text=raw_text)
-    raw_response=_call_groq(client, RESUME_SYSTEM_PROMPT, prompt)
-    result=_try_parse_json(raw_response)
-
-    if result is None:
-        return _validate_resume_result(result)
-    
+    prompt = RESUME_USER_PROMPT.format(raw_text=raw_text)
+    try:
+        raw_response = _call_groq(client, RESUME_SYSTEM_PROMPT, prompt)
+        result = _try_parse_json(raw_response)
+        if result is not None:
+            return _validate_resume_result(result)
+    except Exception as exc:
+        logger.warning(f"Groq resume parse failed: {exc}")
 
     logger.warning("Groq resume parse: first attempt returned invalid JSON, retrying...")
     strict_prompt = (
@@ -125,14 +178,16 @@ def parse_resume(raw_text: str)->Dict:
         "Return ONLY the raw JSON object, no markdown, no explanation, no code fences.\n\n"
         + prompt
     )
-    raw_response = _call_groq(client, RESUME_SYSTEM_PROMPT, strict_prompt)
-    result = _try_parse_json(raw_response)
-    if result is not None:
-        return _validate_resume_result(result)
+    try:
+        raw_response = _call_groq(client, RESUME_SYSTEM_PROMPT, strict_prompt)
+        result = _try_parse_json(raw_response)
+        if result is not None:
+            return _validate_resume_result(result)
+    except Exception as exc:
+        logger.warning(f"Groq retry parse failed: {exc}")
 
-    raise ValueError(
-        f"Groq returned unparseable response after retry. Raw response:\n{raw_response[:500]}"
-    )
+    logger.warning("Groq parse unparseable after retry; using graceful fallback")
+    return _fallback_parse_resume(raw_text)
     
 JD_SYSTEM_PROMPT = (
     "You are a job description parser. Extract information and "
@@ -160,14 +215,31 @@ Important instructions:
 Job Description Text:
 {raw_text}"""
 
-def parse_job_description(raw_text: str) -> Dict:
-    client = _get_client()
-    prompt = JD_USER_PROMPT.format(raw_text=raw_text)
+def _fallback_parse_jd(raw_text: str) -> Dict:
+    """Heuristic fallback when Groq cannot return valid JD JSON."""
+    words = [w.strip('.,()[]{}:;') for w in raw_text.split() if len(w) > 3]
+    return _validate_jd_result({
+        "job_title": "",
+        "required_skills": words[:10],
+        "preferred_skills": [],
+        "keywords": list(set(words))[:20],
+    })
 
-    raw_response = _call_groq(client, JD_SYSTEM_PROMPT, prompt)
-    result = _try_parse_json(raw_response)
-    if result is not None:
-        return _validate_jd_result(result)
+def parse_job_description(raw_text: str) -> Dict:
+    try:
+        client = _get_client()
+    except Exception as exc:
+        logger.warning(f"Could not initialize Groq client for JD ({exc}); using fallback")
+        return _fallback_parse_jd(raw_text)
+
+    prompt = JD_USER_PROMPT.format(raw_text=raw_text)
+    try:
+        raw_response = _call_groq(client, JD_SYSTEM_PROMPT, prompt)
+        result = _try_parse_json(raw_response)
+        if result is not None:
+            return _validate_jd_result(result)
+    except Exception as exc:
+        logger.warning(f"Groq JD parse failed: {exc}")
 
     logger.warning("Groq JD parse: first attempt returned invalid JSON, retrying...")
     strict_prompt = (
@@ -175,14 +247,16 @@ def parse_job_description(raw_text: str) -> Dict:
         "Return ONLY the raw JSON object, no markdown, no explanation, no code fences.\n\n"
         + prompt
     )
-    raw_response = _call_groq(client, JD_SYSTEM_PROMPT, strict_prompt)
-    result = _try_parse_json(raw_response)
-    if result is not None:
-        return _validate_jd_result(result)
+    try:
+        raw_response = _call_groq(client, JD_SYSTEM_PROMPT, strict_prompt)
+        result = _try_parse_json(raw_response)
+        if result is not None:
+            return _validate_jd_result(result)
+    except Exception as exc:
+        logger.warning(f"Groq retry JD parse failed: {exc}")
 
-    raise ValueError(
-        f"Groq returned unparseable response after retry. Raw response:\n{raw_response[:500]}"
-    )
+    logger.warning("Groq JD parse unparseable after retry; using graceful fallback")
+    return _fallback_parse_jd(raw_text)
 
 #it will make sure, that the parse json has all the valid fields we expect
 def _validate_jd_result(result: dict) -> dict:

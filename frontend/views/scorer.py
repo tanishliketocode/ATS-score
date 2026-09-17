@@ -46,20 +46,114 @@ def _show_backend_error(exc: Exception) -> None:
 
 
 def _summary_text(analysis: dict) -> str:
-    """Tiny client-side text summary for the Download button."""
+    """Comprehensive client-side text report for the Download button."""
     score = analysis.get("ATS_score", analysis.get("ats_score", 0))
-    lines = [f"ATS Score: {score:.0f}/100", ""]
-    if analysis.get("strengths"):
-        lines.append("STRENGTHS:")
-        lines.extend(f"  - {s}" for s in analysis["strengths"])
+    lines = [
+        "=" * 60,
+        "             ATS RESUME ANALYSIS REPORT",
+        "=" * 60,
+        f"Overall ATS Score: {score:.1f}/100",
+        ""
+    ]
+
+    # Component Scores
+    cs = analysis.get("component_scores", {})
+    if cs:
+        lines.append("------------------------------------------------------------")
+        lines.append("SCORE BREAKDOWN BY COMPONENT:")
+        lines.append("------------------------------------------------------------")
+        lines.append(f"  - Formatting:        {cs.get('formatting', 0):.1f} / 20.0")
+        lines.append(f"  - Keywords:          {cs.get('keywords', 0):.1f} / 25.0")
+        lines.append(f"  - Content Quality:   {cs.get('content', 0):.1f} / 25.0")
+        lines.append(f"  - Skill Validation:  {cs.get('skill_validation', 0):.1f} / 15.0")
+        lines.append(f"  - ATS Compatibility: {cs.get('ats_compatibility', 0):.1f} / 15.0")
         lines.append("")
-    if analysis.get("critical_issues"):
-        lines.append("CRITICAL ISSUES:")
-        lines.extend(f"  - {s}" for s in analysis["critical_issues"])
+
+    # Issues Summary
+    issues_sum = analysis.get("issues_summary", [])
+    if issues_sum:
+        lines.append("------------------------------------------------------------")
+        lines.append("KEY ISSUES DETECTED:")
+        lines.append("------------------------------------------------------------")
+        for item in issues_sum:
+            lines.append(f"  [!] {item}")
         lines.append("")
-    if analysis.get("suggestions"):
-        lines.append("SUGGESTIONS:")
-        lines.extend(f"  - {s}" for s in analysis["suggestions"])
+
+    # Detailed Feedback
+    detailed = analysis.get("detailed_feedback", [])
+    if detailed:
+        lines.append("------------------------------------------------------------")
+        lines.append("DETAILED FINDINGS & ACTION ITEMS:")
+        lines.append("------------------------------------------------------------")
+        for idx, fb in enumerate(detailed, 1):
+            if hasattr(fb, "model_dump"):
+                fb = fb.model_dump()
+            elif hasattr(fb, "__dict__"):
+                fb = fb.__dict__
+            title = fb.get("issue_title") or fb.get("issue") or "Issue"
+            severity = fb.get("severity_level") or "Info"
+            explanation = fb.get("explanation") or ""
+            how_to_fix = fb.get("how_to_fix") or ""
+            example = fb.get("example_improvement") or fb.get("example") or ""
+            actions = fb.get("action_items") or []
+
+            lines.append(f"{idx}. [{severity.upper()}] {title}")
+            if explanation:
+                lines.append(f"   Explanation: {explanation}")
+            if how_to_fix:
+                lines.append(f"   How to Fix:  {how_to_fix}")
+            if example:
+                lines.append(f"   Example:     {example}")
+            if actions:
+                lines.append("   Actions:")
+                for a in actions:
+                    lines.append(f"     - {a}")
+            lines.append("")
+
+    # Skill Validation Details
+    sv = analysis.get("skill_validation_details", {})
+    if sv:
+        if hasattr(sv, "model_dump"):
+            sv = sv.model_dump()
+        lines.append("------------------------------------------------------------")
+        lines.append("SKILL VALIDATION ANALYSIS:")
+        lines.append("------------------------------------------------------------")
+        val_pct = sv.get("validation_pct", 0)
+        lines.append(f"Validation Rate: {val_pct:.1f}%")
+        validated = sv.get("validated", [])
+        if validated:
+            lines.append("  Validated Skills (Supported by projects/experience):")
+            for item in validated:
+                skill_name = item.get("skill") if isinstance(item, dict) else str(item)
+                lines.append(f"    [OK] {skill_name}")
+        unval = sv.get("unvalidated", [])
+        if unval:
+            lines.append("  Unvalidated Skills (Mentioned without clear evidence):")
+            for skill_name in unval:
+                lines.append(f"    [?]  {skill_name}")
+        lines.append("")
+
+    # JD Comparison (if applicable)
+    jd = analysis.get("jd_match_analysis") or analysis.get("jd_comparison")
+    if jd:
+        if hasattr(jd, "model_dump"):
+            jd = jd.model_dump()
+        lines.append("------------------------------------------------------------")
+        lines.append("JOB DESCRIPTION MATCH ANALYSIS:")
+        lines.append("------------------------------------------------------------")
+        lines.append(f"  Match Percentage:    {jd.get('match_percentage', 0):.1f}%")
+        lines.append(f"  Semantic Similarity: {jd.get('semantic_similarity', 0):.3f}")
+        if jd.get("matched_keywords"):
+            lines.append(f"  Matched Keywords:    {', '.join(jd['matched_keywords'])}")
+        if jd.get("missing_keywords"):
+            lines.append(f"  Missing Keywords:    {', '.join(jd['missing_keywords'])}")
+        if jd.get("skills_gap"):
+            lines.append(f"  Skills Gap:          {', '.join(jd['skills_gap'])}")
+        lines.append("")
+
+    lines.append("=" * 60)
+    lines.append("End of Report")
+    lines.append("=" * 60)
     return "\n".join(lines)
 
 
