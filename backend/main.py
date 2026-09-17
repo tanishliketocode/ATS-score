@@ -1,7 +1,18 @@
+import os
+import gc
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# Optimize memory consumption for constrained environments (e.g. Render Free Tier 512MB RAM)
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
+import torch
+torch.set_num_threads(1)
+torch.set_grad_enabled(False)
 
 from backend.core.config import(
     ALLOWED_ORIGINS, 
@@ -26,15 +37,23 @@ async def lifespan(app:FastAPI):
         logger.info(f'Loaded {SPACY_MODEL_PRIMARY}')
     except OSError:
         logger.warning(f'{SPACY_MODEL_PRIMARY} not found — falling back to {SPACY_MODEL_SECONDARY}')
-        app.state.nlp = spacy.load(SPACY_MODEL_SECONDARY)
-        logger.info(f'Loaded {SPACY_MODEL_SECONDARY} (fallback)')
+        try:
+            app.state.nlp = spacy.load(SPACY_MODEL_SECONDARY)
+            logger.info(f'Loaded {SPACY_MODEL_SECONDARY} (fallback)')
+        except OSError:
+            logger.warning('Neither primary nor secondary spaCy model found — downloading en_core_web_sm on the fly...')
+            from spacy.cli import download
+            download("en_core_web_sm")
+            app.state.nlp = spacy.load("en_core_web_sm")
+            logger.info('Loaded en_core_web_sm (auto-downloaded)')
 
     logger.info(f'Loading SentenceTransformer: {SENTENCE_TRANSFORMER_MODEL}')
     from sentence_transformers import SentenceTransformer
     app.state.embedder = SentenceTransformer(SENTENCE_TRANSFORMER_MODEL)
     logger.info(f'Loaded {SENTENCE_TRANSFORMER_MODEL}')
 
-    logger.info('All models loaded. API is ready to serve requests.')
+    gc.collect()
+    logger.info('All models loaded and memory optimized. API is ready to serve requests.')
 
     yield
 
